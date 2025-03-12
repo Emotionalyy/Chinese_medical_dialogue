@@ -1,0 +1,153 @@
+import pandas as pd
+import re
+import jieba
+from sklearn.model_selection import train_test_split
+import json
+
+def summary(path):
+    # 设置encoding处理中文csv问题
+    df = pd.read_csv(path,encoding =  'GB18030')
+    print(f'数据集维度：{df.shape}')
+    print('描述性统计：\n'f'{df.describe(include = object).T}')
+    print('数据类型：\n'f'{df.info()}')
+    print('数据集的重复值情况：\n'f'{df.duplicated().sum()}')
+    print('数据集缺失值情况：\n'f'{df.isnull().sum()}')
+    print('数据集前5行：\n'f'{df.head()}')
+
+# 男科
+nk_path = r"..\data\Data_数据\Andriatria_男科\男科5-13000.csv"
+# 内科
+nei_path = r"..\data\Data_数据\IM_内科\内科5000-33000.csv"
+# 妇产科
+fc_path = r"..\data\Data_数据\OAGD_妇产科\妇产科6-28000.csv"
+# 肿瘤科
+zl_path = r"..\data\Data_数据\Oncology_肿瘤科\肿瘤科5-10000.csv"
+# 儿科
+child_path = r"..\data\Data_数据\Pediatric_儿科\儿科5-14000.csv"
+# 外科
+surgical_path = r"..\data\Data_数据\Surgical_外科\外科5-14000.csv"
+
+# 去除包含无效字符或符号的问题和答案
+def clean_text(text):
+    # 去除HTML标签
+    text = re.sub('<.*?>','',text)
+    # 去除特殊符号
+    text = re.sub('[^\w\s]','',text)
+    return text.strip()
+
+def data_clean(path):
+    df = pd.read_csv(path,encoding = 'GB18030')
+    # 删除重复值
+    df = df.drop_duplicates(keep = 'first')
+    df['ask'] = df['ask'].map(lambda x:x.strip())
+    # 剔除ask='无'
+    df = df.drop(df[df['ask'] == '无'].index,axis = 0)
+    # 去除包含无效字符或符号的问题和答案
+    df['ask'] = df['ask'].apply(clean_text)
+    df['answer'] = df['answer'].apply(clean_text)
+    return df
+
+nk_df = data_clean(nk_path)
+nei_df = data_clean(nei_path)
+fc_df = data_clean(fc_path)
+zl_df = data_clean(zl_path)
+child_df = data_clean(child_path)
+surgical_df = data_clean(surgical_path)
+
+df_name = [nk_df,nei_df,fc_df,zl_df,child_df,surgical_df]
+department = ['男科','内科','妇产科','肿瘤科','儿科','外科']
+for idx,df in enumerate(df_name):
+   print(f'{department[idx]}:{df.shape}')
+
+# 创建一个空的集合来存储停用词
+stopwords = set()
+
+# 打开文件
+with open(r'停用词.txt', 'r') as f:
+    # 遍历文件的每一行
+    for line in f:
+        # 移除行尾的换行符并添加到set中
+        stopwords.add(line.rstrip('\n'))
+
+# 划词函数
+def segment(text):
+    words = jieba.lcut(text)
+    temp = []
+    for word in words:
+        if word not in stopwords:
+            temp.append(word)
+    # 过滤
+    # word = filter(lambda x: len(x) > 1, word)    
+    return ' '.join(temp)
+
+
+ciyun_words_ask_list = []
+ciyun_words_answer_list = []
+
+for idx,df in enumerate(df_name):
+    # 因为数据存在非str数据，需要转换
+    df['ask'] = df['ask'].astype('str')
+    df['answer'] = df['answer'].astype('str')
+    
+    # 分词
+    df['ask_seg'] = df['ask'].apply(segment)
+    print(f'{department[idx]}:{"ask segment finished"}')
+    df['answer_seg'] = df['answer'].apply(segment)
+    print(f'{department[idx]}:{"answer segment finished"}')
+    # 删除分词后NULL的行
+    df.dropna(axis=0, how='any', inplace=True)
+    
+    # 添加标签列
+    df.insert(0, 'type', '%s'% department[idx])
+    
+    # 词云
+    ciyun_words_ask = ' '.join(df['ask_seg'])
+    ciyun_words_ask_list.append(ciyun_words_ask)
+    ciyun_words_answer = ' '.join(df['answer_seg'])
+    ciyun_words_answer_list.append(ciyun_words_answer)
+
+from wordcloud import WordCloud
+# 设置参数，创建WordCloud对象
+wc = WordCloud(
+    width=400,                  # 设置宽为400px
+    height=300,                 # 设置高为300px
+    background_color='white',   # 设置背景颜色为白色
+#     stopwords=stopwords,        # 设置禁用词，在生成的词云中不会出现set集合中的词
+    max_font_size=60,          # 设置最大的字体大小，所有词都不会超过100px
+    min_font_size=10,           # 设置最小的字体大小，所有词都不会超过10px
+    max_words=70,               # 设置最大的单词个数
+    scale=2,                    # 扩大x倍
+    font_path='msyh.ttc'        # 设置中文      
+)
+
+# 根据文本数据生成词云图
+def generating_ciyun_map(ciyun_words_list, name):
+    for i in range(6):
+        wc.generate(ciyun_words_list[i])
+        # 保存词云文件
+        wc.to_file(r'ciyunPhoto\%s_%s_ciyun_words_image.png'%(department[i], name))
+        print("%s %s Word ciyun_words image has been saved."%(department[i], name))
+        
+#         # 获取词频  
+#         word_freq = wc.words_
+
+#         # 打印词频
+#         for word, freq in word_freq.items():
+#             print(f"{word}: {freq}")
+        
+generating_ciyun_map(ciyun_words_ask_list, "ask")
+generating_ciyun_map(ciyun_words_answer_list, "answer")
+
+# 保存处理后的数据
+processed_data_path = r"../data/Processed_data/"
+for idx,df in enumerate(df_name):
+    temp = df
+    temp.to_csv(processed_data_path + "%s.csv"%department[idx], index = False,encoding = 'GB18030')
+    print(f'{department[idx]}:{"processed_data_saved"}')
+    
+totaldf = pd.concat(df_name,axis = 0)
+totaldf.to_csv(processed_data_path + "totaldf.csv", index = False,encoding = 'GB18030')
+
+totaldf = pd.read_csv(processed_data_path + "totaldf.csv", encoding = 'GB18030')
+print(totaldf.shape)
+totaldf.head()

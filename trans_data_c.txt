@@ -1,0 +1,210 @@
+import pandas as pd
+import re
+import jieba
+from sklearn.model_selection import train_test_split
+import json
+import numpy as np
+
+processed_data_path = r"../data/Processed_data/"
+totaldf = pd.read_csv(processed_data_path + "totaldf.csv", encoding = 'GB18030')
+totaldf.dropna(axis=0,how='any',inplace=True)
+print(totaldf.shape)
+
+from sklearn.preprocessing import LabelEncoder
+
+# 创建LabelEncoder对象
+label_encoder_type = LabelEncoder()
+label_encoder_department = LabelEncoder()
+
+# 将字符串标签编码为整数
+labels_encoded_type = label_encoder_type.fit_transform(totaldf['type'])
+labels_encoded_department = label_encoder_department.fit_transform(totaldf['department'])
+
+totaldf.insert(1, 'type_code', labels_encoded_type)
+totaldf.insert(3, 'department_code', labels_encoded_department)
+
+# 将整数编码的预测结果转换为原始字符串标签
+print(label_encoder_type.inverse_transform([4]))
+
+# 划分出训练集和验证集
+traindf, evaldf = train_test_split(totaldf,test_size=0.2, random_state=2023)
+
+from gensim.models import Word2Vec
+from gensim.models.word2vec import LineSentence
+
+
+sentences_ask = traindf['ask_seg'].apply(lambda x: x.split()).tolist()
+sentences_answer = traindf['answer_seg'].apply(lambda x: x.split()).tolist()
+
+sentences = sentences_ask + sentences_answer
+
+# 构建并训练word2vec模型，创建词语向量
+model_wv_train = Word2Vec(sentences=sentences,
+                    vector_size=100,
+                    window=5,  # window：表示当前词与预测词在一个句子中的最大距离是多少
+                    min_count=1,  # 词频少于min_count次数的单词会被丢弃掉
+                    workers=6)  # 参数控制训练的并行数
+
+model_wv_train.build_vocab(sentences)
+
+# 词向量保存
+model_wv_train_vector_path = r'../data/Processed_data/data_wv_train.vector'
+model_wv_train.wv.save_word2vec_format(model_wv_train_vector_path, binary=False)
+# 模型保存
+model_wv_train_model_path = r'../model/model_wv_train.model'
+model_wv_train.save(model_wv_train_model_path)
+
+model_wv_train = Word2Vec.load(model_wv_train_model_path)
+
+# 将文本转化为向量
+def words_to_vector(text):
+    vec = np.zeros(100).reshape((1, 100))
+    for word in text:
+        try:
+            vec += model_wv_train.wv[word].reshape((1, 100))
+        except KeyError:
+            continue
+    return vec
+
+# 将词向量保存为 Ndarray
+# x_train = np.concatenate(traindf['ask_seg'].apply(words_to_vector))
+x_train = np.concatenate([words_to_vector(z) for z in traindf['ask_seg']])
+y_train = np.array(traindf['department_code'])
+
+x_evaldf = np.concatenate([words_to_vector(z) for z in evaldf['ask_seg']])
+y_evaldf = np.array(evaldf['department_code'])
+
+# 保存数组
+data_vector_train_evaldf_path = r'../data/Processed_data/data_vector_train_evaldf.npz'
+np.savez(data_vector_train_evaldf_path, x_train=x_train, y_train=y_train, x_evaldf = x_evaldf, y_evaldf = y_evaldf)
+
+# 加载保存的数组
+data_vector_train_evaldf_path = r'../data/Processed_data/data_vector_train_evaldf.npz'
+data_vector_train_evaldf = np.load(data_vector_train_evaldf_path)
+x_train = data_vector_train_evaldf['x_train']
+y_train = data_vector_train_evaldf['y_train']
+x_evaldf = data_vector_train_evaldf['x_evaldf']
+y_evaldf = data_vector_train_evaldf['y_train']
+
+# 引入分类模型相关库
+from sklearn.ensemble import RandomForestClassifier
+
+model_RandomForest = RandomForestClassifier()
+
+# 设定分段数目
+num_segments = 5
+
+# 计算每个子集的大小
+segment_size = len(x_train) // num_segments
+
+# 循环训练模型
+for i in range(num_segments):
+    start_index = i * segment_size
+    end_index = (i + 1) * segment_size
+    
+    # 选择训练集和测试集
+    x_train_segment = x_train[start_index:end_index]
+    y_train_segment = y_train[start_index:end_index]
+    x_evaldf_segment = x_evaldf
+    y_evaldf_segment = y_evaldf
+    
+    # 模型训练
+    model_RandomForest.fit(x_train_segment, y_train_segment)
+
+# ValueError: setting an array element with a sequence.
+# 1、输入到模型里的数据没严格转换成 np.array()形式；
+# 2、矩阵没对齐，个别行成员数量与其他不一致等；
+# 3、数据dtype不对或者说不一致，应该统一成 np.float64, int或者其他。
+# model_RandomForest.fit(x_train, y_train)
+
+import joblib
+
+model_RandomForest_path = "../model/model_RandomForest.pkl"
+model_RandomForest = joblib.load(model_RandomForest_path)
+print("模型加载成功")
+
+# 模型得分
+print("随机森林分类模型得分：%f" % (model_RandomForest.score(x_evaldf, y_evaldf)))
+
+# CNN
+from gensim.models import KeyedVectors
+
+model_vector = KeyedVectors.load_word2vec_format(r'../data/Processed_data/data_wv_train.vector', binary=False)
+
+from torch.utils import data
+import torch
+import torch.nn as nn
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+import torch.optim as optim
+
+class TestDataset(data.Dataset):#继承Dataset
+    def __init__(self, x, y):
+        self.Data=x          #一些由2维向量表示的数据集
+        self.Label=y         #这是数据集对应的标签
+
+    def __getitem__(self, index):
+        #把numpy转换为Tensor
+        txt=torch.from_numpy(np.array(self.Data[index]))
+        label=torch.tensor(np.array(self.Label[index]))
+        return txt,label
+
+    def __len__(self):
+        return len(self.Data)
+
+class TextCNN(nn.Module):
+    def __init__(self,embedding_size, num_classes):
+        super(TextCNN, self).__init__()
+        self.W = nn.Embedding(len(model_vector), embedding_size)
+        self.conv = nn.Sequential(
+            # conv : [input_channel(=1), output_channel, (filter_height, filter_width), stride=1]
+            nn.Conv2d(1, 3, (2, embedding_size)),
+            nn.ReLU(),
+            # pool : ((filter_height, filter_width))
+            nn.MaxPool2d((2, 1)),
+        )
+        # fc
+        self.fc = nn.Linear(12, num_classes)
+
+    def forward(self, X):
+        batch_size = X.shape[0]
+        embedding_X = self.W(X)  # [batch_size, sequence_length, embedding_size]
+        embedding_X = embedding_X.unsqueeze(
+            1)  # add channel(=1) [batch, channel(=1), sequence_length, embedding_size]
+        conved = self.conv(embedding_X)  # [batch_size, output_channel, 1, 1]
+        flatten = conved.view(batch_size, -1)  # [batch_size, output_channel*1*1]
+        output = self.fc(flatten)
+        return output
+# 将数据转化为pytorch专用数据类型，方便批量化处理
+Test=TestDataset(x_train, y_train)
+batch_size = 3
+test_loader = data.DataLoader(Test,batch_size,shuffle=False)
+# 调用模型
+embedding_size = 2
+num_classes = 2
+model = TextCNN(embedding_size,num_classes).to(device)
+criterion = nn.CrossEntropyLoss().to(device)
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+for epoch in range(50):
+  for batch_x, batch_y in test_loader:
+    batch_x, batch_y = batch_x.to(device).long(), batch_y.to(device).long()
+    pred = model(batch_x)
+    loss = criterion(pred, batch_y)
+    if (epoch + 1) % 10 == 0:
+        print('Epoch:', '%04d' % (epoch + 1), 'loss =', '{:.6f}'.format(loss))
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+# Test
+# test_text = 'i hate me'
+# tests = [[word2idx[n] for n in test_text.split()]]
+# test_batch = torch.LongTensor(tests).to(device)
+# # Predict
+# model = model.eval()
+# predict = model(test_batch).data.max(1, keepdim=True)[1]
+# if predict[0][0] == 0:
+#     print(test_text,"is Bad Mean...")
+# else:
+#     print(test_text,"is Good Mean!!")
